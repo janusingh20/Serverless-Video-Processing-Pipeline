@@ -45,18 +45,3 @@ infra/template.yaml   # AWS SAM template (S3, DDB, API Gateway, Step Functions, 
 lambdas/*             # Python Lambda handlers
 web/                  # React (Vite) frontend
 ```
-
----
-
-## 🧩 Extensions / Next Steps
-
-- Swap FFmpeg Lambda → AWS Elemental MediaConvert (production-grade scalability).  
-- Add **HLS packaging** and signed CloudFront URLs.  
-- Add list/status API → UI can display job history.  
-- Add **CORS + Cognito Auth** for secure multi-user portal.  
-
----
-
-## 📸 Screenshots (to add)
-- Web upload UI  
-- Step Functions execution graph  
