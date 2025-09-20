@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Video pipeline v2.1 - API + Step Functions + S3->EventBridge trigger
+  (no cycles)
+Parameters:
+  ProjectName:
+    Type: String
+    Default: video-pipeline
+  FFMPEGLayerArn:
+    Type: String
+    Default: ''
+    Description: Optional FFmpeg Lambda Layer ARN (/opt/bin/ffmpeg, /opt/bin/ffprobe)
+Globals:
+  Function:
+    Runtime: python3.10
+    Timeout: 900
+    MemorySize: 1024
+    Tracing: Active
+    Environment:
+      Variables:
+        VIDEOS_TABLE:
+          Ref: VideosTable
+        UPLOADS_BUCKET:
+          Ref: UploadsBucket
+        PROCESSED_BUCKET:
+          Ref: ProcessedBucket
+        THUMBNAILS_BUCKET:
+          Ref: ThumbnailsBucket
+  Api:
+    TracingEnabled: true
+    Cors:
+      AllowOrigin: '''*'''
+      AllowHeaders: '''*'''
+      AllowMethods: '''GET,POST,PUT,OPTIONS'''
+Resources:
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      CorsConfiguration:
+        CorsRules:
+        - AllowedMethods:
+          - PUT
+          - GET
+          - HEAD
+          AllowedOrigins:
+          - '*'
+          AllowedHeaders:
+          - '*'
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+        - AllowedMethods:
+          - GET
+          - HEAD
+          AllowedOrigins:
+          - '*'
+          AllowedHeaders:
+          - '*'
+  ThumbnailsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+        - AllowedMethods:
+          - GET
+          - HEAD
+          AllowedOrigins:
+          - '*'
+          AllowedHeaders:
+          - '*'
+  VideosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: videoId
+        AttributeType: S
+      KeySchema:
+      - AttributeName: videoId
+        KeyType: HASH
+  RequestUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../../lambdas/request_upload_url
+      Handler: handler.lambda_handler
+      Policies:
+      - S3CrudPolicy:
+          BucketName:
+            Ref: UploadsBucket
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: VideosTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /request-upload-url
+            Method: POST
+  TranscodeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../../lambdas/transcode
+      Handler: handler.lambda_handler
+      Layers:
+      - Fn::If:
+        - HasLayer
+        - Ref: FFMPEGLayerArn
+        - Ref: AWS::NoValue
+      Policies:
+      - S3CrudPolicy:
+          BucketName:
+            Ref: UploadsBucket
+      - S3CrudPolicy:
+          BucketName:
+            Ref: ProcessedBucket
+  ThumbnailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../../lambdas/thumbnail
+      Handler: handler.lambda_handler
+      Layers:
+      - Fn::If:
+        - HasLayer
+        - Ref: FFMPEGLayerArn
+        - Ref: AWS::NoValue
+      Policies:
+      - S3CrudPolicy:
+          BucketName:
+            Ref: UploadsBucket
+      - S3CrudPolicy:
+          BucketName:
+            Ref: ThumbnailsBucket
+  TranscribeStartFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../../lambdas/transcribe_start
+      Handler: handler.lambda_handler
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - transcribe:StartTranscriptionJob
+          Resource: '*'
+  TranscribePollFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: TranscribePollFunction
+      Handler: handler.lambda_handler
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - transcribe:GetTranscriptionJob
+          Resource: '*'
+      - S3CrudPolicy:
+          BucketName:
+            Ref: ProcessedBucket
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: VideosTable
+    Metadata:
+      SamResourceId: TranscribePollFunction
+  PipelineStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-Pipeline
+      Definition:
+        StartAt: Transcode
+        States:
+          Transcode:
+            Type: Task
+            Resource:
+              Fn::GetAtt:
+              - TranscodeFunction
+              - Arn
+            Next: Thumbnail
+            Catch:
+            - ErrorEquals:
+              - States.ALL
+              ResultPath: $.transcodeError
+              Next: Thumbnail
+          Thumbnail:
+            Type: Task
+            Resource:
+              Fn::GetAtt:
+              - ThumbnailFunction
+              - Arn
+            Next: TranscribeStart
+            Catch:
+            - ErrorEquals:
+              - States.ALL
+              ResultPath: $.thumbnailError
+              Next: TranscribeStart
+          TranscribeStart:
+            Type: Task
+            Resource:
+              Fn::GetAtt:
+              - TranscribeStartFunction
+              - Arn
+            Next: TranscribeWait
+          TranscribeWait:
+            Type: Task
+            Resource:
+              Fn::GetAtt:
+              - TranscribePollFunction
+              - Arn
+            Retry:
+            - ErrorEquals:
+              - States.TaskFailed
+              IntervalSeconds: 10
+              BackoffRate: 1.5
+              MaxAttempts: 20
+            End: true
+      Policies:
+      - LambdaInvokePolicy:
+          FunctionName:
+            Ref: TranscodeFunction
+      - LambdaInvokePolicy:
+          FunctionName:
+            Ref: ThumbnailFunction
+      - LambdaInvokePolicy:
+          FunctionName:
+            Ref: TranscribeStartFunction
+      - LambdaInvokePolicy:
+          FunctionName:
+            Ref: TranscribePollFunction
+  S3ToStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: StartExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource:
+              Fn::GetAtt:
+              - PipelineStateMachine
+              - Arn
+  S3UploadEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Start pipeline when an .mp4 is created in uploads bucket
+      EventPattern:
+        source:
+        - aws.s3
+        detail-type:
+        - Object Created
+        detail:
+          bucket:
+            name:
+            - Ref: UploadsBucket
+          object:
+            key:
+            - suffix: .mp4
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - PipelineStateMachine
+          - Arn
+        Id: StartPipeline
+        RoleArn:
+          Fn::GetAtt:
+          - S3ToStepFunctionsRole
+          - Arn
+        InputTransformer:
+          InputPathsMap:
+            bucket: $.detail.bucket.name
+            key: $.detail.object.key
+          InputTemplate:
+            Fn::Sub: "{\n  \"bucket\": \"<bucket>\",\n  \"key\": \"<key>\",\n  \"\
+              processedBucket\": \"${ProcessedBucket}\"\n}\n"
+      State: ENABLED
+Conditions:
+  HasLayer:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: FFMPEGLayerArn
+      - ''
+Outputs:
+  ApiBaseUrl:
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Stage
+  UploadsBucketName:
+    Value:
+      Ref: UploadsBucket
+  ProcessedBucketName:
+    Value:
+      Ref: ProcessedBucket
+  ThumbnailsBucketName:
+    Value:
+      Ref: ThumbnailsBucket
+  VideosTableName:
+    Value:
+      Ref: VideosTable
+  StateMachineName:
+    Value:
+      Ref: PipelineStateMachine
