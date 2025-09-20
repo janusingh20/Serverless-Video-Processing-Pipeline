@@ -1,78 +1,62 @@
-# Serverless Video Processing Pipeline (Cloud/Infra)
+# 🎬 Serverless Video Processing Pipeline (Cloud/Infra)
 
-**Upload a video → pipeline compresses, generates thumbnails, and transcribes → ready to stream.**
+> A cloud-native pipeline that takes raw video uploads and automatically **transcodes, generates thumbnails, and runs transcription** — making videos ready for streaming at scale.  
+> Designed as a **serverless MVP** to showcase AWS architecture, event-driven workflows, and infrastructure-as-code.
 
-## 🧱 Architecture (MVP)
-- **S3 (uploads bucket)** — raw user uploads.
-- **S3 (processed bucket)** — H.264/AAC MP4 output (or HLS), public-read **via CloudFront**.
-- **S3 (thumbnails bucket)** — extracted JPEG/PNG frames.
-- **DynamoDB (Videos table)** — video metadata & job status.
-- **API Gateway + Lambda** — issue **pre-signed S3 upload URLs**.
-- **S3 Event → Lambda** — when an object lands in uploads, start the **Step Functions** workflow.
-- **Step Functions** orchestrates:
-  1) `transcode` (FFmpeg) → compressed output to processed bucket
-  2) `thumbnail` (FFmpeg) → preview image(s) to thumbnails bucket
-  3) `transcribe_start` (Amazon Transcribe) → starts job
-  4) `transcribe_poll` (polls Transcribe) → on success, store transcript URI
-  5) update DynamoDB status + CloudFront URL
+---
 
-> ⚠️ For FFmpeg in Lambda, attach an **FFmpeg Lambda Layer** (see README below). In production, consider **AWS Elemental MediaConvert** for large/long videos.
+## 🧱 Architecture
 
-## 🛠 Stack
-- **AWS SAM** (IaC) — template-driven deploys
-- **Python 3.11 Lambdas** — boto3, FFmpeg via layer
-- **React (Vite)** — simple upload UI using presigned URL
-- **CloudFront** — CDN in front of processed output
+- **S3 (Uploads Bucket)** — raw user uploads  
+- **S3 (Processed Bucket)** — H.264/AAC MP4 (or HLS), served via CloudFront  
+- **S3 (Thumbnails Bucket)** — extracted preview images  
+- **DynamoDB (Videos Table)** — video metadata & job status  
+- **API Gateway + Lambda** — issues presigned S3 upload URLs  
+- **Step Functions** — orchestrates the full pipeline:
+  1. **Transcode** (FFmpeg / MediaConvert) → processed bucket  
+  2. **Thumbnail** (FFmpeg) → thumbnails bucket  
+  3. **Transcribe** (Amazon Transcribe) → transcript stored & linked  
+  4. **DynamoDB Update** → final CloudFront playback URL  
 
-## 🚀 Quick Start
-### 1) Prereqs
-- AWS CLI configured
-- SAM CLI installed (`sam --version`)
-- Node 18+ for the web app
+---
 
-### 2) Deploy Infra
-```bash
-cd infra
-sam build
-sam deploy --guided
+## 🛠️ Tech Stack
+
+- **Infra**: AWS SAM (Infrastructure as Code)  
+- **Lambdas**: Python 3.11 (boto3, FFmpeg via Lambda Layer)  
+- **Frontend**: React (Vite) — upload UI with presigned URL  
+- **Delivery**: CloudFront for CDN streaming  
+
+---
+
+## 🚀 How It Works
+
+1. User uploads a video → UI requests presigned S3 URL.  
+2. Browser PUTs file → S3 triggers Step Functions workflow.  
+3. Workflow executes transcode → thumbnail → transcription tasks.  
+4. Metadata is stored in DynamoDB; final assets served via CloudFront.  
+
+---
+
+## 📦 Project Structure
+
 ```
-Take note of the output API endpoint (for **request_upload_url**) and the **CloudFront domain**.
-
-### 3) Run Web (local)
-```bash
-cd ../web
-npm i
-npm run dev
-```
-Create `.env` in `web/`:
-```
-VITE_API_BASE=https://<api-id>.execute-api.<region>.amazonaws.com/Prod
+infra/template.yaml   # AWS SAM template (S3, DDB, API Gateway, Step Functions, Lambdas)
+lambdas/*             # Python Lambda handlers
+web/                  # React (Vite) frontend
 ```
 
-### 4) Upload Flow
-1. Click **Upload** → UI asks backend for a **presigned PUT URL**.
-2. Browser **PUTs** video directly to the **uploads** S3 bucket.
-3. S3 **ObjectCreated** event triggers `on_upload` Lambda → starts the **Step Functions** job.
-4. State machine runs `transcode` → `thumbnail` → `transcribe_start`/`transcribe_poll` → updates DynamoDB.
-5. UI polls DynamoDB via the API (optional extension) to show status and the final **CloudFront playback URL**.
+---
 
-## 🧩 FFmpeg Layer
-- Use a Lambda Layer providing static FFmpeg binaries (e.g., `ffmpeg`, `ffprobe` in `/opt/bin`).
-- Example public layers exist on GitHub; or build one with AWS SAM/Container. Update the **`FFMPEG_LAYER_ARN`** parameter during `sam deploy --guided`.
+## 🧩 Extensions / Next Steps
 
-## 🔒 IAM Notes
-- Lambdas need S3 read/write to specific buckets, DynamoDB CRUD on the Videos table, and Transcribe permissions (`transcribe:StartTranscriptionJob`, `transcribe:GetTranscriptionJob`).
-- State Machine needs permission to invoke tasks; `on_upload` needs to `StartExecution` on the state machine.
+- Swap FFmpeg Lambda → AWS Elemental MediaConvert (production-grade scalability).  
+- Add **HLS packaging** and signed CloudFront URLs.  
+- Add list/status API → UI can display job history.  
+- Add **CORS + Cognito Auth** for secure multi-user portal.  
 
-## 📦 What’s in here
-```
-infra/template.yaml        # SAM template with S3/DDB/APIGW/StepFunctions/Lambdas
-lambdas/*                  # Python Lambda handlers (scaffold)
-web/                       # Vite React app (upload UI)
-```
+---
 
-## ✅ Next Steps
-- Swap FFmpeg-Lambda for **MediaConvert** (robust, scalable) using `AWS::MediaConvert` job.
-- Add **HLS packaging** and CloudFront **signed URLs**.
-- Add **list/status API** to fetch video statuses from DynamoDB in the UI.
-- Add **CORS** + Auth (Cognito) for a production portal.
+## 📸 Screenshots (to add)
+- Web upload UI  
+- Step Functions execution graph  
